@@ -2091,6 +2091,35 @@ void test_filler_frame(void**) {
     }
 }
 
+// A filler after a lead frame of 0..40 bytes: its header, padding or payload crosses the
+// boundary of 64-byte V2 chunks, and V2 still drops all of it
+void test_filler_frame_across_v2_chunks(void**) {
+    std::mt19937 rng(16);
+    for (size_t lead = 0; lead <= 40; ++lead) {
+        for (uint64_t shift = 1; shift < 16; ++shift) {
+            TVectorStream stream;
+            std::vector<TExpectedFrame> frames;
+            const std::string text(lead, 'l');
+            SerializeFarInplace<TWrappedString>(stream, TActorId(1, 1, 1), TActorId(1, 2, 2), text);
+            frames.push_back({TWrappedString::MessageId, text, false});
+            char filler[MaxFillerSize];
+            const size_t fillerSize = WriteFiller(filler, shift);
+            std::memcpy(stream.Acquire(fillerSize).data(), filler, fillerSize);
+            stream.Commit(fillerSize);
+            WriteAlignedFrames(stream, 2, rng, frames);
+
+            // Fills each chunk up to its end, so chunk boundaries are at multiples of 64
+            TZeroCopyEnvelopeReaderV2 reader(64, 1);
+            reader.Push(stream.Data.data(), stream.Committed);
+            std::vector<TEnvelope> envelopes;
+            while (auto e = reader.Pop()) {
+                envelopes.push_back(std::move(*e));
+            }
+            CheckAlignedFrames(envelopes, frames);
+        }
+    }
+}
+
 // TNode pads relative to its own stream offset, across several drains and both send paths
 void test_node_aligns_payloads(void**) {
     using TPoller = TDefaultPoller;
@@ -2182,7 +2211,7 @@ void test_node_rejects_message_id_with_padding_bits(void**) {
 }
 
 // Frames queued during a write that fails keep their alignment on the next connection.
-void test_node_realigns_queue_on_reconnect(void**) {
+void test_node_filler_keeps_queue_aligned_on_reconnect(void**) {
     using TPoller = TDefaultPoller;
     TLoop<TPoller> loop;
     auto& poller = loop.Poller();
@@ -2377,9 +2406,10 @@ int main(int argc, char** argv) {
     ADD_TEST(cmocka_unit_test, test_payload_alignment_v1_and_plain_reader);
     ADD_TEST(cmocka_unit_test, test_payload_alignment_wire_format);
     ADD_TEST(cmocka_unit_test, test_filler_frame);
+    ADD_TEST(cmocka_unit_test, test_filler_frame_across_v2_chunks);
     ADD_TEST(cmocka_unit_test, test_node_aligns_payloads);
     ADD_TEST(cmocka_unit_test, test_node_rejects_message_id_with_padding_bits);
-    ADD_TEST(cmocka_unit_test, test_node_realigns_queue_on_reconnect);
+    ADD_TEST(cmocka_unit_test, test_node_filler_keeps_queue_aligned_on_reconnect);
 
     return _cmocka_run_group_tests("test_actors", tests.data(), tests.size(), NULL, NULL);
 }

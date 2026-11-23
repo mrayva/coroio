@@ -294,13 +294,31 @@ public:
                 poller->AddWrite(fd, h);
                 if (deadline != TTime::max()) {
                     timerId = poller->AddTimer(deadline, h);
+                    timerRegistered = true;
                 }
             }
 
             void await_resume() {
-                if (deadline != TTime::max() && poller->RemoveTimer(timerId, deadline)) {
+                const bool timedOut = timerRegistered && poller->RemoveTimer(timerId, deadline);
+                timerRegistered = false;
+                if (timedOut) {
+                    poller->RemoveEvent(fd);
                     throw std::system_error(std::make_error_code(std::errc::timed_out));
                 }
+
+                int socketError = 0;
+#ifdef _WIN32
+                int errorSize = sizeof(socketError);
+                if (::getsockopt(static_cast<SOCKET>(fd), SOL_SOCKET, SO_ERROR,
+                        reinterpret_cast<char*>(&socketError), &errorSize) == SOCKET_ERROR)
+                    throw std::system_error(WSAGetLastError(), std::generic_category(), "getsockopt(SO_ERROR)");
+#else
+                socklen_t errorSize = sizeof(socketError);
+                if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &errorSize) < 0)
+                    throw std::system_error(errno, std::generic_category(), "getsockopt(SO_ERROR)");
+#endif
+                if (socketError)
+                    throw std::system_error(socketError, std::generic_category(), "connect");
             }
 
             TPollerBase* poller;
@@ -308,6 +326,7 @@ public:
             std::pair<const sockaddr*, int> addr;
             TTime deadline;
             unsigned timerId = 0;
+            bool timerRegistered = false;
         };
         return TAwaitable{Poller_, Fd_, Addr_.RawAddr(), deadline};
     }

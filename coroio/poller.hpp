@@ -52,6 +52,12 @@ public:
     void RemoveEvent(int fd) {
         // TODO: resume waiting coroutines here
         MaxFd_ = std::max(MaxFd_, fd);
+        // Poll() may already have copied this descriptor's readiness into the
+        // ready queue before a competing timer resumed its coroutine. Clear the
+        // queued handles in place so the later WakeupReadyHandles pass cannot
+        // resume an awaiter a second time.
+        for (auto& event : ReadyEvents_)
+            if (event.Fd == fd) event.Handle = {};
         Changes_.emplace_back(TEvent{fd, TEvent::READ|TEvent::WRITE|TEvent::RHUP, {}});
     }
 
@@ -121,7 +127,7 @@ public:
 
     void WakeupReadyHandles() {
         for (auto&& ev : ReadyEvents_) {
-            Wakeup(std::move(ev));
+            if (ev.Handle) Wakeup(std::move(ev));
         }
     }
 

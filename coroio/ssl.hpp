@@ -60,15 +60,29 @@ public:
 
     TSslSocket& operator=(TSslSocket&& other) {
         if (this != &other) {
+            const auto hasPendingHandshake = [](const TSslSocket& socket) {
+                return (socket.Handshake && !socket.Handshake.done()) || !socket.Waiters.empty();
+            };
+            if (hasPendingHandshake(*this) || hasPendingHandshake(other)) {
+                throw std::logic_error("Cannot move-assign a TLS socket with a pending handshake");
+            }
+
+            if (Handshake) Handshake.destroy();
+            if (Ssl) SSL_free(Ssl);
+
             Socket = std::move(other.Socket);
             Ctx = other.Ctx;
             Ssl = other.Ssl;
             Rbio = other.Rbio;
             Wbio = other.Wbio;
             Handshake = other.Handshake;
+            Waiters = std::move(other.Waiters);
+            LastState = other.LastState;
+            other.Ctx = nullptr;
             other.Ssl = nullptr;
             other.Rbio = other.Wbio = nullptr;
             other.Handshake = nullptr;
+            other.LastState = nullptr;
         }
         return *this;
     }

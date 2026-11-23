@@ -107,6 +107,48 @@ public:
         return TAwaitableRead{Poller_,Fd_,buf,size};
     }
 
+    auto ReadSome(void* buf, size_t size, TTime deadline) {
+        struct TAwaitableRead: public TAwaitable<TAwaitableRead> {
+            TAwaitableRead(TPollerBase* poller, int fd, void* buf, size_t size, TTime deadline)
+                : TAwaitable<TAwaitableRead>{poller, fd, buf, size}
+                , deadline(deadline)
+            { }
+
+            void run() {
+                this->ret = TSockOps::read(this->fd, this->b, this->s);
+            }
+
+            bool await_ready() {
+                this->SafeRun();
+                return (this->ready = (this->ret >= 0));
+            }
+
+            void await_suspend(std::coroutine_handle<> h) {
+                this->poller->AddRead(this->fd, h);
+                if (deadline != TTime::max()) {
+                    timerId = this->poller->AddTimer(deadline, h);
+                    timerRegistered = true;
+                }
+            }
+
+            ssize_t await_resume() {
+                const bool timedOut = timerRegistered && this->poller->RemoveTimer(timerId, deadline);
+                timerRegistered = false;
+                if (timedOut) {
+                    this->poller->RemoveEvent(this->fd);
+                    throw std::system_error(std::make_error_code(std::errc::timed_out));
+                }
+                if (!this->ready) this->SafeRun();
+                return this->ret;
+            }
+
+            TTime deadline;
+            unsigned timerId = 0;
+            bool timerRegistered = false;
+        };
+        return TAwaitableRead{Poller_, Fd_, buf, size, deadline};
+    }
+
     // force read on next loop iteration
     auto ReadSomeYield(void* buf, size_t size) {
         struct TAwaitableRead: public TAwaitable<TAwaitableRead> {
@@ -136,6 +178,48 @@ public:
             }
         };
         return TAwaitableWrite{Poller_,Fd_,const_cast<void*>(buf),size};
+    }
+
+    auto WriteSome(const void* buf, size_t size, TTime deadline) {
+        struct TAwaitableWrite: public TAwaitable<TAwaitableWrite> {
+            TAwaitableWrite(TPollerBase* poller, int fd, const void* buf, size_t size, TTime deadline)
+                : TAwaitable<TAwaitableWrite>{poller, fd, const_cast<void*>(buf), size}
+                , deadline(deadline)
+            { }
+
+            void run() {
+                this->ret = TSockOps::write(this->fd, this->b, this->s);
+            }
+
+            bool await_ready() {
+                this->SafeRun();
+                return (this->ready = (this->ret >= 0));
+            }
+
+            void await_suspend(std::coroutine_handle<> h) {
+                this->poller->AddWrite(this->fd, h);
+                if (deadline != TTime::max()) {
+                    timerId = this->poller->AddTimer(deadline, h);
+                    timerRegistered = true;
+                }
+            }
+
+            ssize_t await_resume() {
+                const bool timedOut = timerRegistered && this->poller->RemoveTimer(timerId, deadline);
+                timerRegistered = false;
+                if (timedOut) {
+                    this->poller->RemoveEvent(this->fd);
+                    throw std::system_error(std::make_error_code(std::errc::timed_out));
+                }
+                if (!this->ready) this->SafeRun();
+                return this->ret;
+            }
+
+            TTime deadline;
+            unsigned timerId = 0;
+            bool timerRegistered = false;
+        };
+        return TAwaitableWrite{Poller_, Fd_, buf, size, deadline};
     }
 
     auto WriteSomeYield(const void* buf, size_t size) {

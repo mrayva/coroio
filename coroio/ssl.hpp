@@ -101,7 +101,7 @@ public:
         assert(!Handshake);
         co_await Socket.Connect(deadline);
         SSL_set_connect_state(Ssl);
-        co_return co_await DoHandshake();
+        co_return co_await DoHandshake(deadline);
     }
 
     TValueTask<ssize_t> ReadSome(void* data, size_t size) {
@@ -150,18 +150,59 @@ public:
     }
 
 private:
-    TValueTask<void> DoIO() {
+    TValueTask<void> WriteTransport(const void* data, size_t size, TTime deadline) {
+        const char* p = static_cast<const char*>(data);
+        while (size != 0) {
+            ssize_t written;
+            if constexpr (requires(THandle& socket, const char* buffer, size_t length, TTime until) {
+                    socket.WriteSome(buffer, length, until);
+                }) {
+                written = co_await Socket.WriteSome(p, size, deadline);
+            } else {
+                if (deadline != TTime::max()) {
+                    throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
+                        "TLS transport does not support deadline-aware writes");
+                }
+                written = co_await Socket.WriteSome(p, size);
+            }
+            if (written == 0) throw std::runtime_error("Connection closed");
+            if (written < 0) continue;
+            p += written;
+            size -= size_t(written);
+        }
+        co_return;
+    }
+
+    TValueTask<ssize_t> ReadTransport(void* data, size_t size, TTime deadline) {
+        while (true) {
+            ssize_t read;
+            if constexpr (requires(THandle& socket, void* buffer, size_t length, TTime until) {
+                    socket.ReadSome(buffer, length, until);
+                }) {
+                read = co_await Socket.ReadSome(data, size, deadline);
+            } else {
+                if (deadline != TTime::max()) {
+                    throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
+                        "TLS transport does not support deadline-aware reads");
+                }
+                read = co_await Socket.ReadSome(data, size);
+            }
+            if (read >= 0) co_return read;
+        }
+    }
+
+    TValueTask<void> DoIO(TTime deadline = TTime::max()) {
         char buf[1024];
         int n;
         while ((n = BIO_read(Wbio, buf, sizeof(buf))) > 0) {
-            co_await TByteWriter(Socket).Write(buf, n);
+            co_await WriteTransport(buf, size_t(n), deadline);
         }
         if (n < 0 && !BIO_should_retry(Wbio)) {
             throw std::runtime_error("Cannot read Wbio");
         }
 
         if (SSL_get_error(Ssl, n) == SSL_ERROR_WANT_READ) {
-            auto size = co_await Socket.ReadSome(buf, sizeof(buf));
+            auto size = co_await ReadTransport(buf, sizeof(buf), deadline);
             if (size == 0) {
                 throw std::runtime_error("Connection closed");
             }
@@ -179,14 +220,14 @@ private:
         co_return;
     }
 
-    TValueTask<void> DoHandshake() {
+    TValueTask<void> DoHandshake(TTime deadline = TTime::max()) {
         int r;
         LogState();
         while ((r = SSL_do_handshake(Ssl)) != 1) {
             LogState();
             int status = SSL_get_error(Ssl, r);
             if (status == SSL_ERROR_WANT_READ || status == SSL_ERROR_WANT_WRITE) {
-                co_await DoIO();
+                co_await DoIO(deadline);
             } else {
                 throw std::runtime_error("SSL error: " + std::to_string(r));
             }
@@ -194,7 +235,7 @@ private:
 
         LogState();
 
-        co_await DoIO();
+        co_await DoIO(deadline);
 
         if (Ctx->LogFunc) {
             Ctx->LogFunc("SSL Handshake established\n");

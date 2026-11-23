@@ -5,6 +5,7 @@
 #ifdef __linux__
 #include "uring.hpp"
 #endif
+#include <charconv>
 #include <string_view>
 #include <utility>
 #include <fstream>
@@ -147,6 +148,37 @@ void ParsePacket(uint16_t* xid, std::vector<TAddress>& addresses, char* buf, ssi
         p += addrLen;
         size -= sizeof(TDnsRecordA); size -= addrLen; if (size < 0) { throw std::runtime_error("Not enough data"); }
     }
+}
+
+bool IsValidHostText(std::string_view host) {
+    if (host.empty()) return false;
+    for (unsigned char ch : host) {
+        if (ch <= 0x20 || ch == 0x7f || ch == '[' || ch == ']') return false;
+    }
+    return true;
+}
+
+bool IsIpv6Literal(std::string_view host) {
+    const std::string value(host);
+    in6_addr address{};
+    return inet_pton(AF_INET6, value.c_str(), &address) == 1;
+}
+
+void ValidateHost(std::string_view host) {
+    if (!IsValidHostText(host) ||
+        (host.find(':') != std::string_view::npos && !IsIpv6Literal(host)))
+        throw std::invalid_argument("Invalid host name or address");
+}
+
+int ParsePort(std::string_view portText) {
+    if (portText.empty())
+        throw std::invalid_argument("Port must be an integer from 1 through 65535");
+    uint32_t port = 0;
+    const auto result = std::from_chars(portText.data(), portText.data() + portText.size(), port);
+    if (result.ec != std::errc{} || result.ptr != portText.data() + portText.size() ||
+        port == 0 || port > 65535)
+        throw std::invalid_argument("Port must be an integer from 1 through 65535");
+    return static_cast<int>(port);
 }
 
 } // namespace
@@ -309,16 +341,39 @@ TValueTask<std::vector<TAddress>> TResolver<TPoller>::Resolve(const std::string&
 }
 
 THostPort::THostPort(const std::string& hostPort) {
-    auto pos = hostPort.rfind(':');
-    if (pos == std::string::npos) {
-        throw std::runtime_error("Cannot parse hostPort");
+    const std::string_view input(hostPort);
+    std::string_view host;
+    std::string_view portText;
+    if (!input.empty() && input.front() == '[') {
+        const auto close = input.find(']');
+        if (close == std::string_view::npos || close == 1 || close + 1 >= input.size() ||
+            input[close + 1] != ':')
+            throw std::invalid_argument("Bracketed IPv6 endpoint must be [address]:port");
+        host = input.substr(1, close - 1);
+        if (!IsIpv6Literal(host))
+            throw std::invalid_argument("Bracketed endpoint host must be an IPv6 literal");
+        portText = input.substr(close + 2);
+    } else {
+        const auto separator = input.rfind(':');
+        if (separator == std::string_view::npos || separator == 0)
+            throw std::invalid_argument("Endpoint must be host:port");
+        host = input.substr(0, separator);
+        portText = input.substr(separator + 1);
     }
+    ValidateHost(host);
+    const auto port = ParsePort(portText);
+    Host.assign(host);
+    Port = port;
 }
 
 THostPort::THostPort(const std::string& host, int port)
     : Host(host)
     , Port(port)
-{ }
+{
+    ValidateHost(Host);
+    if (Port < 1 || Port > 65535)
+        throw std::invalid_argument("Port must be an integer from 1 through 65535");
+}
 
 template<typename T>
 TFuture<TAddress> THostPort::Resolve(TResolver<T>& resolver) {
@@ -336,6 +391,7 @@ TFuture<TAddress> THostPort::Resolve(TResolver<T>& resolver) {
 }
 
 template class TResolver<TPollerBase>;
+template TFuture<TAddress> THostPort::Resolve(TResolver<TPollerBase>&);
 #ifdef __linux__
 template class TResolver<TUring>;
 #endif

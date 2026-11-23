@@ -100,6 +100,42 @@ void test_bad_addr(void**) {
     assert_int_equal(flag, 1);
 }
 
+void test_host_port_parsing(void**) {
+    auto reject = [](const std::string& value) {
+        bool rejected = false;
+        try { THostPort endpoint(value); } catch (const std::invalid_argument&) { rejected = true; }
+        assert_true(rejected);
+    };
+    for (const auto& value : {"", "localhost", ":80", "localhost:", "localhost:0",
+             "localhost:65536", "localhost:80x", "host name:80", "host:80:90",
+             "[]:80", "[localhost]:80", "[::1]", "[::1]:80:90"})
+        reject(value);
+
+    const THostPort ipv4("127.0.0.1:43123");
+    assert_string_equal(ipv4.GetHost().c_str(), "127.0.0.1");
+    assert_int_equal(ipv4.GetPort(), 43123);
+
+    const THostPort ipv6("[::1]:43124");
+    assert_string_equal(ipv6.GetHost().c_str(), "::1");
+    assert_int_equal(ipv6.GetPort(), 43124);
+
+    const THostPort unbracketedIpv6("::1:43126");
+    assert_string_equal(unbracketedIpv6.GetHost().c_str(), "::1");
+    assert_int_equal(unbracketedIpv6.GetPort(), 43126);
+
+    const THostPort fromFields("localhost", 43125);
+    assert_string_equal(fromFields.GetHost().c_str(), "localhost");
+    assert_int_equal(fromFields.GetPort(), 43125);
+    for (int invalidPort : {0, -1, 65536}) {
+        bool rejected = false;
+        try { THostPort endpoint("127.0.0.1", invalidPort); } catch (const std::invalid_argument&) { rejected = true; }
+        assert_true(rejected);
+    }
+    bool rejectedEmptyHost = false;
+    try { THostPort endpoint("", 80); } catch (const std::invalid_argument&) { rejectedEmptyHost = true; }
+    assert_true(rejectedEmptyHost);
+}
+
 template<typename TPoller>
 void test_listen(void**) {
     int port = getport();
@@ -1194,6 +1230,7 @@ int main() {
         cmocka_unit_test(test_addr),
         cmocka_unit_test(test_addr6),
         cmocka_unit_test(test_bad_addr),
+        cmocka_unit_test(test_host_port_parsing),
         cmocka_unit_test(test_timespec),
         cmocka_unit_test(test_line_splitter),
         cmocka_unit_test(test_zero_copy_line_splitter),

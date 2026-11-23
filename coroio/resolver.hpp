@@ -98,12 +98,15 @@ public:
     THostPort(const std::string& hostPort);
     THostPort(const std::string& host, int port);
 
+    const std::string& GetHost() const { return Host; }
+    int GetPort() const { return Port; }
+
     template<typename T>
     TFuture<TAddress> Resolve(TResolver<T>& resolver);
 
 private:
     std::string Host;
-    int Port;
+    int Port = 0;
 };
 
 } // namespace NNet

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <exception>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "promises.hpp"
@@ -8,6 +10,11 @@
 #include "corochain.hpp"
 
 namespace NNet {
+
+namespace TDetail {
+// Encode and validate a DNS name, including the terminating root label.
+std::string EncodeDnsName(std::string_view name);
+}
 
 class TResolvConf {
 public:

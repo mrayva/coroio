@@ -108,8 +108,10 @@ void test_host_port_parsing(void**) {
     };
     for (const auto& value : {"", "localhost", ":80", "localhost:", "localhost:0",
              "localhost:65536", "localhost:80x", "host name:80", "host:80:90",
-             "[]:80", "[localhost]:80", "[::1]", "[::1]:80:90"})
+             "[]:80", "[localhost]:80", "[::1]", "[::1]:80:90", "example..com:80"})
         reject(value);
+    reject(std::string(64, 'x') + ":80");
+    reject(std::string(500, 'x') + ":80");
 
     const THostPort ipv4("127.0.0.1:43123");
     assert_string_equal(ipv4.GetHost().c_str(), "127.0.0.1");
@@ -126,6 +128,9 @@ void test_host_port_parsing(void**) {
     const THostPort fromFields("localhost", 43125);
     assert_string_equal(fromFields.GetHost().c_str(), "localhost");
     assert_int_equal(fromFields.GetPort(), 43125);
+    const THostPort absoluteName("example.com.:43127");
+    assert_string_equal(absoluteName.GetHost().c_str(), "example.com.");
+    assert_int_equal(absoluteName.GetPort(), 43127);
     for (int invalidPort : {0, -1, 65536}) {
         bool rejected = false;
         try { THostPort endpoint("127.0.0.1", invalidPort); } catch (const std::invalid_argument&) { rejected = true; }
@@ -134,6 +139,32 @@ void test_host_port_parsing(void**) {
     bool rejectedEmptyHost = false;
     try { THostPort endpoint("", 80); } catch (const std::invalid_argument&) { rejectedEmptyHost = true; }
     assert_true(rejectedEmptyHost);
+}
+
+void test_dns_name_encoding_enforces_wire_limits_and_absolute_names(void**) {
+    std::string expected("\x03" "www" "\x07" "example" "\x03" "com", 16);
+    expected.push_back('\0');
+    assert_true(TDetail::EncodeDnsName("www.example.com") == expected);
+    assert_true(TDetail::EncodeDnsName("www.example.com.") == expected);
+    assert_true(TDetail::EncodeDnsName(".") == std::string(1, '\0'));
+
+    const auto maxName = std::string(63, 'a') + "." + std::string(63, 'b') + "." +
+        std::string(63, 'c') + "." + std::string(61, 'd');
+    assert_int_equal(TDetail::EncodeDnsName(maxName).size(), 255);
+    assert_int_equal(TDetail::EncodeDnsName(maxName + ".").size(), 255);
+
+    const auto reject = [](const std::string& name) {
+        bool rejected = false;
+        try { (void)TDetail::EncodeDnsName(name); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        assert_true(rejected);
+    };
+    reject("");
+    reject(".example.com");
+    reject("example..com");
+    reject(std::string(64, 'x'));
+    reject(maxName + "x");
+    reject(std::string("bad\thost"));
 }
 
 template<typename TPoller>
@@ -1231,6 +1262,7 @@ int main() {
         cmocka_unit_test(test_addr6),
         cmocka_unit_test(test_bad_addr),
         cmocka_unit_test(test_host_port_parsing),
+        cmocka_unit_test(test_dns_name_encoding_enforces_wire_limits_and_absolute_names),
         cmocka_unit_test(test_timespec),
         cmocka_unit_test(test_line_splitter),
         cmocka_unit_test(test_zero_copy_line_splitter),

@@ -25,12 +25,6 @@ struct TDnsHeader {
     uint16_t arcount = 0;  /* Number of additional records */
 } __attribute__((__packed__));
 
-struct TDnsQuestion {
-    char* name;        /* Pointer to the domain name in memory */
-    uint16_t dnstype;  /* The QTYPE (1 = A) */
-    uint16_t dnsclass; /* The QCLASS (1 = IN) */
-} __attribute__((__packed__));
-
 struct TDnsRecordA {
     uint16_t type;
     uint16_t clazz;
@@ -41,59 +35,64 @@ struct TDnsRecordA {
 
 static_assert(sizeof(TDnsRecordA) == 10);
 
-void CreatePacket(const std::string& name, EDNSType type, char* packet, int* size, uint16_t xid)
-{
+} // namespace
+
+std::string TDetail::EncodeDnsName(std::string_view name) {
+    if (name.empty()) throw std::invalid_argument("DNS name cannot be empty");
+    if (name == ".") return std::string(1, '\0');
+
+    const auto nameEnd = name.back() == '.' ? name.size() - 1 : name.size();
+    if (!nameEnd) throw std::invalid_argument("DNS name has no labels");
+
+    std::string encoded;
+    size_t labelStart = 0;
+    for (size_t i = 0; i <= nameEnd; ++i) {
+        if (i != nameEnd && name[i] != '.') {
+            const auto ch = static_cast<unsigned char>(name[i]);
+            if (ch <= 0x20 || ch == 0x7f)
+                throw std::invalid_argument("DNS name contains whitespace or a control character");
+            continue;
+        }
+
+        const auto labelBytes = i - labelStart;
+        if (!labelBytes || labelBytes > 63)
+            throw std::invalid_argument("DNS labels must contain between 1 and 63 bytes");
+        if (encoded.size() > 253 || labelBytes > 253 - encoded.size())
+            throw std::invalid_argument("DNS name exceeds the 255-byte wire limit");
+        encoded.push_back(static_cast<char>(labelBytes));
+        encoded.append(name.substr(labelStart, labelBytes));
+        labelStart = i + 1;
+    }
+    encoded.push_back('\0');
+    return encoded;
+}
+
+namespace {
+
+void CreatePacket(std::string_view name, EDNSType type, char* packet,
+        size_t capacity, int* size, uint16_t xid) {
+    const auto encodedName = TDetail::EncodeDnsName(name);
+    const size_t packetlen = sizeof(TDnsHeader) + encodedName.size() + 2 * sizeof(uint16_t);
+    if (packetlen > capacity)
+        throw std::invalid_argument("DNS query exceeds its packet buffer");
+
     TDnsHeader header = {
         .xid = htons(xid),
         .flags = htons(0x0100), /* Q=0, RD=1 */
         .qdcount = htons(1) /* Sending 1 question */
     };
 
-    std::string query; query.resize(name.size() + 2);
-    TDnsQuestion question = {
-        .name = &query[0],
-        .dnstype = htons (static_cast<uint16_t>(type)),  /* QTYPE 1=A */
-        .dnsclass = htons (1), /* QCLASS 1=IN */
-    };
-
-    memcpy (question.name + 1, &name[0], name.size());
-    uint8_t* prev = (uint8_t*) question.name;
-    uint8_t count = 0; /* Used to count the bytes in a field */
-
-    /* Traverse through the name, looking for the . locations */
-    for (size_t i = 0; i < name.size(); i++)
-    {
-        /* A . indicates the end of a field */
-        if (name[i] == '.') {
-            /* Copy the length to the byte before this field, then
-            update prev to the location of the . */
-            *prev = count;
-            prev = (uint8_t*)question.name + i + 1;
-            count = 0;
-        }
-        else {
-            count++;
-        }
-    }
-    *prev = count;
-
-    size_t packetlen = sizeof (header) + name.size() + 2 +
-        sizeof (question.dnstype) + sizeof (question.dnsclass);
-    assert(packetlen <= 4096);
-    *size = packetlen;
-
-    uint8_t *p = (uint8_t *)packet;
-
-    /* Copy the header first */
-    memcpy (p, &header, sizeof (header));
-    p += sizeof (header);
-
-    /* Copy the question name, QTYPE, and QCLASS fields */
-    memcpy(p, question.name, name.size() + 1);
-    p += name.size() + 2; /* includes 0 octet for end */
-    memcpy(p, &question.dnstype, sizeof (question.dnstype));
-    p += sizeof (question.dnstype);
-    memcpy(p, &question.dnsclass, sizeof (question.dnsclass));
+    auto* p = reinterpret_cast<uint8_t*>(packet);
+    std::memcpy(p, &header, sizeof(header));
+    p += sizeof(header);
+    std::memcpy(p, encodedName.data(), encodedName.size());
+    p += encodedName.size();
+    const auto queryType = htons(static_cast<uint16_t>(type));
+    const auto queryClass = htons(uint16_t(1));
+    std::memcpy(p, &queryType, sizeof(queryType));
+    p += sizeof(queryType);
+    std::memcpy(p, &queryClass, sizeof(queryClass));
+    *size = static_cast<int>(packetlen);
 }
 
 void ParsePacket(uint16_t* xid, std::vector<TAddress>& addresses, char* buf, ssize_t size) {
@@ -168,6 +167,8 @@ void ValidateHost(std::string_view host) {
     if (!IsValidHostText(host) ||
         (host.find(':') != std::string_view::npos && !IsIpv6Literal(host)))
         throw std::invalid_argument("Invalid host name or address");
+    if (host.find(':') == std::string_view::npos)
+        (void)TDetail::EncodeDnsName(host);
 }
 
 int ParsePort(std::string_view portText) {
@@ -246,8 +247,8 @@ TFuture<void> TResolver<TPoller>::SenderTask() {
         auto req = AddResolveQueue.front(); AddResolveQueue.pop();
         int len;
         memset(buf, 0, sizeof(buf));
+        CreatePacket(req.Name, req.Type, buf, sizeof(buf), &len, Xid);
         Inflight[Xid] = req;
-        CreatePacket(req.Name, req.Type, buf, &len, Xid);
         Xid = 1 + (Xid + 1) % 65535;
         co_await TByteWriter(Socket).Write(buf, len);
     }
@@ -318,6 +319,7 @@ void TResolver<TPoller>::ResumeSender() {
 
 template<typename TPoller>
 TValueTask<std::vector<TAddress>> TResolver<TPoller>::Resolve(const std::string& hostname, EDNSType type) {
+    (void)TDetail::EncodeDnsName(hostname);
     auto handle = co_await Self();
     if (type == EDNSType::DEFAULT) {
         type = DefaultType;

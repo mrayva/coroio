@@ -415,13 +415,23 @@ public:
         return TAwaitable{Poller_, Fd_, Addr_.RawAddr(), deadline};
     }
 
-    auto Accept() {
+    auto Accept(TTime deadline = TTime::max()) {
         struct TAwaitable {
             bool await_ready() const { return false; }
             void await_suspend(std::coroutine_handle<> h) {
                 poller->AddRead(fd, h);
+                if (deadline != TTime::max()) {
+                    timerId = poller->AddTimer(deadline, h);
+                    timerRegistered = true;
+                }
             }
             TSocket await_resume() {
+                const bool timedOut = timerRegistered && poller->RemoveTimer(timerId, deadline);
+                timerRegistered = false;
+                if (timedOut) {
+                    poller->RemoveEvent(fd);
+                    throw std::system_error(std::make_error_code(std::errc::timed_out));
+                }
                 char clientaddr[sizeof(sockaddr_in6)];
                 socklen_t len = sizeof(sockaddr_in6);
 
@@ -435,9 +445,12 @@ public:
 
             TPollerBase* poller;
             int fd;
+            TTime deadline;
+            unsigned timerId = 0;
+            bool timerRegistered = false;
         };
 
-        return TAwaitable{Poller_, Fd_};
+        return TAwaitable{Poller_, Fd_, deadline};
     }
 
     void Bind();

@@ -94,9 +94,11 @@ void TPoll::Poll()
             }
 #endif
             if (Fds_[idx].events == 0) {
-                std::swap(Fds_[idx], Fds_.back());
-                std::get<1>(InEvents_[Fds_[idx].fd]) = idx;
-                Fds_.back().events = 0;
+                if (static_cast<size_t>(idx) + 1 != Fds_.size()) {
+                    Fds_[idx] = Fds_.back();
+                    std::get<1>(InEvents_[Fds_[idx].fd]) = idx;
+                }
+                Fds_.pop_back();
                 idx = -1;
             }
         }
@@ -107,7 +109,7 @@ void TPoll::Poll()
     }
 
     Reset();
-    if (ppoll(&Fds_[0], Fds_.size(), &ts, nullptr) < 0) {
+    if (ppoll(Fds_.data(), Fds_.size(), &ts, nullptr) < 0) {
         throw std::system_error(errno, std::generic_category(), "poll");
     }
 

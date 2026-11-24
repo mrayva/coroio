@@ -126,19 +126,25 @@ public:
     TValueTask<ssize_t> ReadSome(void* data, size_t size) {
         co_await WaitHandshake();
 
-        int n = SSL_read(Ssl, data, size);
-        int status;
-        if (n > 0) {
-            co_return n;
+        while (true) {
+            const int n = SSL_read(Ssl, data, size);
+            const int status = n > 0 ? SSL_ERROR_NONE : SSL_get_error(Ssl, n);
+            if (n > 0) {
+                co_await DoIO(SSL_ERROR_NONE);
+                co_return n;
+            }
+
+            if (status == SSL_ERROR_WANT_READ || status == SSL_ERROR_WANT_WRITE) {
+                co_await DoIO(status);
+                continue;
+            }
+
+            co_await DoIO(status);
+            if (status == SSL_ERROR_ZERO_RETURN) {
+                co_return 0;
+            }
+            throw std::runtime_error("SSL read error: " + std::to_string(status));
         }
-
-        do {
-            co_await DoIO();
-            n = SSL_read(Ssl, data, size);
-            status = SSL_get_error(Ssl, n);
-        } while (n < 0 && (status == SSL_ERROR_WANT_READ || status == SSL_ERROR_WANT_WRITE));
-
-        co_return n;
     }
 
     TValueTask<ssize_t> WriteSome(const void* data, size_t size) {
@@ -148,15 +154,17 @@ public:
         const char* p = (const char*)data;
         while (size != 0) {
             auto n = SSL_write(Ssl, p, size);
-            auto status = SSL_get_error(Ssl, n);
-            if (!(status == SSL_ERROR_WANT_READ || status == SSL_ERROR_WANT_WRITE || status == SSL_ERROR_NONE)) {
-                throw std::runtime_error("SSL error: " + std::to_string(status));
-            }
             if (n <= 0) {
-                throw std::runtime_error("SSL error: " + std::to_string(status));
+                const auto status = SSL_get_error(Ssl, n);
+                if (status == SSL_ERROR_WANT_READ || status == SSL_ERROR_WANT_WRITE) {
+                    co_await DoIO(status);
+                    continue;
+                }
+                co_await DoIO(status);
+                throw std::runtime_error("SSL write error: " + std::to_string(status));
             }
 
-            co_await DoIO();
+            co_await DoIO(SSL_ERROR_NONE);
 
             size -= n;
             p += n;
@@ -210,7 +218,7 @@ private:
         }
     }
 
-    TValueTask<void> DoIO(TTime deadline = TTime::max()) {
+    TValueTask<void> DoIO(int sslStatus, TTime deadline = TTime::max()) {
         char buf[1024];
         int n;
         while ((n = BIO_read(Wbio, buf, sizeof(buf))) > 0) {
@@ -220,7 +228,7 @@ private:
             throw std::runtime_error("Cannot read Wbio");
         }
 
-        if (SSL_get_error(Ssl, n) == SSL_ERROR_WANT_READ) {
+        if (sslStatus == SSL_ERROR_WANT_READ) {
             auto size = co_await ReadTransport(buf, sizeof(buf), deadline);
             if (size == 0) {
                 throw std::runtime_error("Connection closed");
@@ -246,7 +254,7 @@ private:
             LogState();
             int status = SSL_get_error(Ssl, r);
             if (status == SSL_ERROR_WANT_READ || status == SSL_ERROR_WANT_WRITE) {
-                co_await DoIO(deadline);
+                co_await DoIO(status, deadline);
             } else {
                 throw std::runtime_error("SSL error: " + std::to_string(r));
             }
@@ -254,7 +262,7 @@ private:
 
         LogState();
 
-        co_await DoIO(deadline);
+        co_await DoIO(SSL_ERROR_NONE, deadline);
 
         if (Ctx->LogFunc) {
             Ctx->LogFunc("SSL Handshake established\n");

@@ -110,6 +110,15 @@ public:
         co_return std::move(socket);
     }
 
+    TValueTask<TSslSocket<THandle>> Accept(TTime deadline)
+        requires requires(THandle& socket, TTime until) { socket.Accept(until); }
+    {
+        auto underlying = std::move(co_await Socket.Accept(deadline));
+        auto socket = TSslSocket(std::move(underlying), *Ctx);
+        SSL_set_accept_state(socket.Ssl);
+        co_return std::move(socket);
+    }
+
     TValueTask<void> AcceptHandshake() {
         assert(!Handshake);
         SSL_set_accept_state(Ssl);
@@ -174,6 +183,18 @@ public:
 
     auto Poller() {
         return Socket.Poller();
+    }
+
+    int Fd() const
+        requires requires(const THandle& socket) { socket.Fd(); }
+    {
+        return Socket.Fd();
+    }
+
+    void Close()
+        requires requires(THandle& socket) { socket.Close(); }
+    {
+        Socket.Close();
     }
 
 private:

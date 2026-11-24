@@ -5,6 +5,7 @@
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 
+#include <exception>
 #include <stdexcept>
 #include <functional>
 
@@ -76,12 +77,16 @@ public:
             Rbio = other.Rbio;
             Wbio = other.Wbio;
             Handshake = other.Handshake;
+            HandshakeFinished = other.HandshakeFinished;
+            HandshakeError = std::move(other.HandshakeError);
             Waiters = std::move(other.Waiters);
             LastState = other.LastState;
             other.Ctx = nullptr;
             other.Ssl = nullptr;
             other.Rbio = other.Wbio = nullptr;
             other.Handshake = nullptr;
+            other.HandshakeFinished = false;
+            other.HandshakeError = nullptr;
             other.LastState = nullptr;
         }
         return *this;
@@ -255,22 +260,29 @@ private:
             Ctx->LogFunc("SSL Handshake established\n");
         }
 
-        for (auto w : Waiters) {
-            w.resume();
-        }
-        Waiters.clear();
-
         co_return;
     }
 
     void StartHandshake() {
         assert(!Handshake);
+        HandshakeFinished = false;
+        HandshakeError = nullptr;
         Handshake = RunHandshake();
     }
 
     TVoidSuspendedTask RunHandshake() {
-        // TODO: catch exception
-        co_await DoHandshake();
+        try {
+            co_await DoHandshake();
+        } catch (...) {
+            HandshakeError = std::current_exception();
+        }
+
+        HandshakeFinished = true;
+        auto waiters = std::move(Waiters);
+        Waiters.clear();
+        for (auto waiter : waiters) {
+            if (waiter) waiter.resume();
+        }
         co_return;
     }
 
@@ -280,20 +292,24 @@ private:
         }
         struct TAwaitable {
             bool await_ready() {
-                return !handshake || handshake.done();
+                return *finished || !handshake || handshake.done();
             }
 
             void await_suspend(std::coroutine_handle<> h) {
                 waiters->push_back(h);
             }
 
-            void await_resume() { }
+            void await_resume() {
+                if (*error) std::rethrow_exception(*error);
+            }
 
             std::coroutine_handle<> handshake;
             std::vector<std::coroutine_handle<>>* waiters;
+            bool* finished;
+            std::exception_ptr* error;
         };
 
-        return TAwaitable { Handshake, &Waiters };
+        return TAwaitable { Handshake, &Waiters, &HandshakeFinished, &HandshakeError };
     };
 
     void LogState() {
@@ -321,6 +337,8 @@ private:
     const char* LastState = nullptr;
 
     std::coroutine_handle<> Handshake;
+    bool HandshakeFinished = false;
+    std::exception_ptr HandshakeError;
     std::vector<std::coroutine_handle<>> Waiters;
 };
 

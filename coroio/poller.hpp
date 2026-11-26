@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <vector>
@@ -52,6 +53,11 @@ public:
     void RemoveEvent(int fd) {
         // TODO: resume waiting coroutines here
         MaxFd_ = std::max(MaxFd_, fd);
+        // A descriptor may be closed and reused before Poll() applies queued
+        // registrations. Drop those old changes so they cannot target the new
+        // object that inherited the same descriptor number.
+        Changes_.erase(std::remove_if(Changes_.begin(), Changes_.end(),
+            [fd](const TEvent& event) { return event.Fd == fd; }), Changes_.end());
         // Poll() may already have copied this descriptor's readiness into the
         // ready queue before a competing timer resumed its coroutine. Clear the
         // queued handles in place so the later WakeupReadyHandles pass cannot

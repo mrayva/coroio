@@ -102,7 +102,10 @@ void TEPoll::Poll() {
             }
         } else if (!eev.events) {
             if (epoll_ctl(Fd_, EPOLL_CTL_DEL, fd, nullptr) < 0) {
-                if (!(errno == EBADF || errno == ENOENT)) { // closed descriptor after TSocket -> close
+                // Closing a descriptor removes its registration from epoll.
+                // If the number was already reused for a regular file, DEL
+                // reports EPERM because that new object cannot be registered.
+                if (!(errno == EBADF || errno == ENOENT || errno == EPERM)) {
                     throw std::system_error(errno, std::generic_category(), "epoll_ctl");
                 }
             }

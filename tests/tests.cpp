@@ -9,6 +9,11 @@
 
 #include <coroio/all.hpp>
 
+#ifdef __linux__
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 extern "C" {
 #include <cmocka.h>
 }
@@ -1210,6 +1215,26 @@ void test_remote_disconnect(void**) {
     assert_true(changed);
 }
 
+#ifdef __linux__
+void test_epoll_removal_after_descriptor_reuse_is_safe(void**) {
+    TEPoll poller;
+    int descriptors[2];
+    assert_int_equal(pipe(descriptors), 0);
+    const int closedDescriptor = descriptors[0];
+
+    poller.AddRead(closedDescriptor, std::noop_coroutine());
+    assert_int_equal(close(closedDescriptor), 0);
+    const int replacementDescriptor = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    assert_int_equal(replacementDescriptor, closedDescriptor);
+
+    poller.RemoveEvent(closedDescriptor);
+    poller.Poll();
+
+    assert_int_equal(close(replacementDescriptor), 0);
+    assert_int_equal(close(descriptors[1]), 0);
+}
+#endif
+
 /* temporary disable
 void test_uring_cancel(void** ) {
     TUring uring(16);
@@ -1294,6 +1319,7 @@ int main() {
         my_unit_test2(test_resolve_bad_name, TSelect, TPoll),
 #ifdef __linux__
         my_unit_test2(test_remote_disconnect, TPoll, TEPoll),
+        cmocka_unit_test(test_epoll_removal_after_descriptor_reuse_is_safe),
         cmocka_unit_test(test_uring_create),
         cmocka_unit_test(test_uring_write),
         cmocka_unit_test(test_uring_read),

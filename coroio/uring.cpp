@@ -81,7 +81,11 @@ void TUring::Recv(int fd, void* buf, int size, std::coroutine_handle<> handle) {
 
 void TUring::Send(int fd, const void* buf, int size, std::coroutine_handle<> handle) {
     struct io_uring_sqe *sqe = GetSqe();
+#ifdef MSG_NOSIGNAL
+    io_uring_prep_send(sqe, fd, buf, size, MSG_NOSIGNAL);
+#else
     io_uring_prep_send(sqe, fd, buf, size, 0);
+#endif
     io_uring_sqe_set_data(sqe, handle.address());
 }
 

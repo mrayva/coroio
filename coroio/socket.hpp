@@ -331,7 +331,11 @@ public:
     }
 
     static auto write(int fd, const void* buf, size_t count) {
+#ifdef MSG_NOSIGNAL
+        return ::send(fd, static_cast<const char*>(buf), count, MSG_NOSIGNAL);
+#else
         return ::send(fd, static_cast<const char*>(buf), count, 0);
+#endif
     }
 
     static auto close(int fd) {

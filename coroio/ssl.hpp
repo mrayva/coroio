@@ -8,6 +8,7 @@
 #include <exception>
 #include <stdexcept>
 #include <functional>
+#include <memory>
 
 #include "base.hpp"
 #include "corochain.hpp"
@@ -17,7 +18,7 @@
 namespace NNet {
 
 struct TSslContext {
-    SSL_CTX* Ctx;
+    SSL_CTX* Ctx = nullptr;
     std::function<void(const char*)> LogFunc = {};
 
     TSslContext(TSslContext&& other)
@@ -32,6 +33,16 @@ struct TSslContext {
     static TSslContext Client(const std::function<void(const char*)>& logFunc = {});
     static TSslContext Server(const char* certfile, const char* keyfile, const std::function<void(const char*)>& logFunc = {});
     static TSslContext ServerFromMem(const void* certfile, const void* keyfile, const std::function<void(const char*)>& logFunc = {});
+    // These contexts verify peer certificates against trustedCaFile. The
+    // client also presents its certificate; the server requires and verifies
+    // one. Peer identity and client endpoint-name policy remain application
+    // responsibilities.
+    static TSslContext MutualTlsClient(const char* trustedCaFile,
+        const char* certFile, const char* keyFile,
+        const std::function<void(const char*)>& logFunc = {});
+    static TSslContext MutualTlsServer(const char* certFile, const char* keyFile,
+        const char* trustedCaFile,
+        const std::function<void(const char*)>& logFunc = {});
 
 private:
     TSslContext();
@@ -189,6 +200,19 @@ public:
         requires requires(const THandle& socket) { socket.Fd(); }
     {
         return Socket.Fd();
+    }
+
+    // Returns an owned reference to the certificate verified during the TLS
+    // handshake, or empty if the peer did not present one. Call after I/O has
+    // completed the handshake.
+    std::shared_ptr<X509> GetPeerCertificate() const {
+        if (!Ssl) return {};
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+        X509* certificate = SSL_get1_peer_certificate(Ssl);
+#else
+        X509* certificate = SSL_get_peer_certificate(Ssl);
+#endif
+        return certificate ? std::shared_ptr<X509>(certificate, X509_free) : std::shared_ptr<X509>{};
     }
 
     void Close()
